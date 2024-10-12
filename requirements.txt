@@ -1,0 +1,9 @@
+streamlit==1.22.0
+fastapi==0.95.2
+uvicorn==0.22.0
+google-api-python-client==2.86.0
+yt-dlp==2023.3.4
+pydub==0.25.1
+python-dotenv==1.0.0
+python-multipart==0.0.6
+

@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube Mashup Creator</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css" rel="stylesheet">
+    <style>
+        :root {
+            --primary-color: #4a90e2;
+            --secondary-color: #f39c12;
+            --background-color: #f4f4f4;
+            --text-color: #333;
+        }
+
+        body {
+            font-family: 'Arial', sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 0;
+            background-color: var(--background-color);
+            color: var(--text-color);
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 2rem auto;
+            padding: 2rem;
+            background-color: #fff;
+            border-radius: 10px;
+            box-shadow: 0 0 20px rgba(0,0,0,0.1);
+        }
+
+        h1 {
+            color: var(--primary-color);
+            text-align: center;
+            margin-bottom: 2rem;
+            font-size: 2.5rem;
+        }
+
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: bold;
+        }
+
+        input[type="text"],
+        input[type="number"],
+        input[type="email"] {
+            width: 100%;
+            padding: 0.8rem;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 1rem;
+        }
+
+        button {
+            display: block;
+            width: 100%;
+            padding: 1rem;
+            background-color: var(--primary-color);
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 1.1rem;
+            transition: background-color 0.3s ease;
+        }
+
+        button:hover {
+            background-color: #3570b8;
+        }
+
+        .loader {
+            border: 5px solid #f3f3f3;
+            border-top: 5px solid var(--secondary-color);
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .message {
+            margin-top: 1.5rem;
+            padding: 1rem;
+            border-radius: 4px;
+            text-align: center;
+            font-weight: bold;
+        }
+
+        .message.success {
+            background-color: #d4edda;
+            color: #155724;
+        }
+
+        .message.error {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+
+        .info-icon {
+            color: var(--primary-color);
+            margin-left: 0.5rem;
+            cursor: help;
+        }
+
+        .tooltip {
+            position: relative;
+            display: inline-block;
+        }
+
+        .tooltip .tooltiptext {
+            visibility: hidden;
+            width: 200px;
+            background-color: #555;
+            color: #fff;
+            text-align: center;
+            border-radius: 6px;
+            padding: 5px;
+            position: absolute;
+            z-index: 1;
+            bottom: 125%;
+            left: 50%;
+            margin-left: -100px;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .tooltip:hover .tooltiptext {
+            visibility: visible;
+            opacity: 1;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1><i class="fas fa-music"></i> YouTube Mashup Creator</h1>
+        <form id="mashupForm">
+            <div class="form-group">
+                <label for="singer_name">Singer name:</label>
+                <input type="text" id="singer_name" name="singer_name" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="num_videos">Number of videos (10-30):</label>
+                <input type="number" id="num_videos" name="num_videos" min="10" max="30" value="10" required>
+                <span class="tooltip">
+                    <i class="fas fa-info-circle info-icon"></i>
+                    <span class="tooltiptext">Choose between 10 and 30 videos for your mashup.</span>
+                </span>
+            </div>
+            
+            <div class="form-group">
+                <label for="trim_duration">Trim duration for each video (20-500 seconds):</label>
+                <input type="number" id="trim_duration" name="trim_duration" min="20" max="500" value="20" required>
+                <span class="tooltip">
+                    <i class="fas fa-info-circle info-icon"></i>
+                    <span class="tooltiptext">Choose a trim duration between 20 and 500 seconds for each video clip.</span>
+                </span>
+            </div>
+            
+            <div class="form-group">
+                <label for="receiver_email">Your email address:</label>
+                <input type="email" id="receiver_email" name="receiver_email" required>
+            </div>
+            
+            <button type="submit"><i class="fas fa-magic"></i> Create and Send Mashup</button>
+        </form>
+        
+        <div id="loader" class="loader" style="display: none;"></div>
+        
+        <div id="message" class="message" style="display: none;"></div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const form = document.getElementById('mashupForm');
+            const loader = document.getElementById('loader');
+            const message = document.getElementById('message');
+
+            function validateEmail(email) {
+                const re = /^(([^<>()\[\]\\.,;:\s@"]+(\.[^<>()\[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/;
+                return re.test(String(email).toLowerCase());
+            }
+
+            form.addEventListener('submit', function(e) {
+                e.preventDefault();
+                
+                const email = form.querySelector('#receiver_email').value;
+                if (!validateEmail(email)) {
+                    message.textContent = 'Please enter a valid email address.';
+                    message.className = 'message error';
+                    message.style.display = 'block';
+                    return;
+                }
+
+                // Show loader
+                loader.style.display = 'block';
+                message.style.display = 'none';
+                
+                // Disable submit button
+                form.querySelector('button[type="submit"]').disabled = true;
+
+                // Create FormData object
+                const formData = new FormData(form);
+
+                // Send AJAX request
+                fetch('/create_mashup', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(data => {
+                    // Hide loader
+                    loader.style.display = 'none';
+                    
+                    // Show message
+                    message.textContent = data.message;
+                    message.className = 'message ' + (data.status === 'success' ? 'success' : 'error');
+                    message.style.display = 'block';
+                    
+                    // Enable submit button
+                    form.querySelector('button[type="submit"]').disabled = false;
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    
+                    // Hide loader
+                    loader.style.display = 'none';
+                    
+                    // Show error message
+                    message.textContent = 'An error occurred. Please try again.';
+                    message.className = 'message error';
+                    message.style.display = 'block';
+                    
+                    // Enable submit button
+                    form.querySelector('button[type="submit"]').disabled = false;
+                });
+            });
+        });
+    </script>
+</body>
+</html>

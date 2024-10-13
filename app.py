@@ -16,7 +16,7 @@ from googleapiclient.discovery import build
 import yt_dlp
 from pydub import AudioSegment
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static')
 
 
 # Load API key and email credentials from .env file
@@ -177,6 +177,7 @@ def index():
 
 @app.route('/create_mashup', methods=['POST'])
 def create_mashup_route():
+    data = request.json
     singer_name = request.form['singer_name']
     num_videos = int(request.form['num_videos'])
     trim_duration = int(request.form['trim_duration'])
@@ -220,6 +221,9 @@ def create_mashup_route():
         return jsonify({'status': 'success', 'message': 'Mashup created and sent successfully! Check your email.'})
     else:
         return jsonify({'status': 'error', 'message': 'Mashup created but failed to send email. Please try again.'})
+    
+    
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)

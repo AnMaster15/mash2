@@ -177,52 +177,77 @@ def index():
 
 @app.route('/create_mashup', methods=['POST'])
 def create_mashup_route():
-    data = request.json
-    singer_name = request.form['singer_name']
-    num_videos = int(request.form['num_videos'])
-    trim_duration = int(request.form['trim_duration'])
-    receiver_email = request.form['receiver_email']
+    try:
+        # Log incoming request data
+        logging.info(f"Received create_mashup request: {request.form}")
 
-    if not singer_name or not is_valid_email(receiver_email):
-        return jsonify({'status': 'error', 'message': 'Please enter a valid singer name and email address.'})
+        # Validate and extract form data
+        singer_name = request.form.get('singer_name')
+        num_videos = request.form.get('num_videos')
+        trim_duration = request.form.get('trim_duration')
+        receiver_email = request.form.get('receiver_email')
 
-    videos = get_youtube_links(api_key, singer_name, max_results=num_videos)
+        # Validate required fields
+        if not all([singer_name, num_videos, trim_duration, receiver_email]):
+            missing_fields = [field for field in ['singer_name', 'num_videos', 'trim_duration', 'receiver_email'] if not request.form.get(field)]
+            return jsonify({'status': 'error', 'message': f'Missing required fields: {", ".join(missing_fields)}'})
 
-    if not videos:
-        return jsonify({'status': 'error', 'message': f'No videos found for {singer_name}. Please try a different singer name.'})
+        # Validate and convert numeric fields
+        try:
+            num_videos = max(int(num_videos), 10)
+            trim_duration = max(int(trim_duration), 20)
+        except ValueError:
+            return jsonify({'status': 'error', 'message': 'Invalid numeric values for num_videos or trim_duration'})
 
-    download_path = tempfile.mkdtemp()
-    video_urls = [url for _, url in videos]
-    audio_files = download_all_audio(video_urls, download_path)
+        # Validate email
+        if not is_valid_email(receiver_email):
+            return jsonify({'status': 'error', 'message': 'Please enter a valid email address.'})
 
-    if not audio_files:
-        return jsonify({'status': 'error', 'message': 'Failed to download audio files. Please try again.'})
+        # Fetch YouTube links
+        logging.info(f"Fetching YouTube links for {singer_name}")
+        videos = get_youtube_links(api_key, singer_name, max_results=num_videos)
 
-    output_file = os.path.join(tempfile.gettempdir(), "mashup.mp3")
-    mashup_file = create_mashup(audio_files, output_file, trim_duration)
+        if not videos:
+            return jsonify({'status': 'error', 'message': f'No videos found for {singer_name}. Please try a different singer name.'})
 
-    if not mashup_file:
-        return jsonify({'status': 'error', 'message': 'Failed to create mashup. Please try again.'})
+        # Create temporary directory
+        with tempfile.TemporaryDirectory() as download_path:
+            logging.info(f"Created temporary directory: {download_path}")
 
-    zip_file = os.path.join(tempfile.gettempdir(), "mashup.zip")
-    create_zip_file(mashup_file, zip_file)
+            # Download audio files
+            video_urls = [url for _, url in videos]
+            logging.info(f"Downloading {len(video_urls)} audio files")
+            audio_files = download_all_audio(video_urls, download_path)
 
-    subject = f"Your {singer_name} YouTube Mashup"
-    body = f"Please find attached your custom YouTube mashup of {singer_name} songs. Duration: {trim_duration * len(audio_files)} seconds."
-    email_sent = send_email(sender_email, receiver_email, subject, body, zip_file, email_password)
+            if not audio_files:
+                return jsonify({'status': 'error', 'message': 'Failed to download audio files. Please try again.'})
 
-    # Cleanup
-    os.remove(mashup_file)
-    os.remove(zip_file)
-    for file in audio_files:
-        os.remove(file)
+            # Create mashup
+            logging.info("Creating mashup")
+            output_file = os.path.join(download_path, "mashup.mp3")
+            mashup_file = create_mashup(audio_files, output_file, trim_duration)
 
-    if email_sent:
-        return jsonify({'status': 'success', 'message': 'Mashup created and sent successfully! Check your email.'})
-    else:
-        return jsonify({'status': 'error', 'message': 'Mashup created but failed to send email. Please try again.'})
-    
-    
+            if not mashup_file:
+                return jsonify({'status': 'error', 'message': 'Failed to create mashup. Please try again.'})
+
+            # Create zip file
+            zip_file = os.path.join(download_path, "mashup.zip")
+            create_zip_file(mashup_file, zip_file)
+
+            # Send email
+            logging.info(f"Sending email to {receiver_email}")
+            subject = f"Your {singer_name} YouTube Mashup"
+            body = f"Please find attached your custom YouTube mashup of {singer_name} songs. Duration: {trim_duration * len(audio_files)} seconds."
+            email_sent = send_email(sender_email, receiver_email, subject, body, zip_file, email_password)
+
+            if email_sent:
+                return jsonify({'status': 'success', 'message': 'Mashup created and sent successfully! Check your email.'})
+            else:
+                return jsonify({'status': 'error', 'message': 'Mashup created but failed to send email. Please try again.'})
+
+    except Exception as e:
+        logging.error(f"Unexpected error in create_mashup_route: {str(e)}", exc_info=True)
+        return jsonify({'status': 'error', 'message': f'An unexpected error occurred: {str(e)}'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

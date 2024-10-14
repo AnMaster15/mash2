@@ -11,13 +11,14 @@ from email import encoders
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import multiprocessing
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, send_from_directory
 from googleapiclient.discovery import build
 import yt_dlp
 from pydub import AudioSegment
 
-app = Flask(__name__, static_folder='static')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
+app = Flask(__name__, static_folder='static')
 
 # Load API key and email credentials from .env file
 load_dotenv()
@@ -27,10 +28,12 @@ email_password = os.getenv('EMAIL_PASSWORD')
 
 # Validate environment variables
 if not all([api_key, sender_email, email_password]):
+    logging.error("Missing environment variables. Please check your .env file.")
     raise ValueError("Missing environment variables. Please check your .env file.")
 
 # Determine the number of CPU cores available
 num_cores = multiprocessing.cpu_count()
+
 
 # Function to validate email
 def is_valid_email(email):
@@ -175,6 +178,20 @@ def send_email(sender_email, receiver_email, subject, body, attachment_path, pas
 def index():
     return render_template('index.html')
 
+@app.route('/static/<path:filename>')
+def serve_static(filename):
+    return send_from_directory(app.static_folder, filename)
+
+@app.errorhandler(404)
+def page_not_found(e):
+    logging.error(f"404 error: {request.url}")
+    return jsonify(error=str(e)), 404
+
+@app.errorhandler(500)
+def internal_server_error(e):
+    logging.error(f"500 error: {str(e)}")
+    return jsonify(error="Internal Server Error"), 500
+
 @app.route('/create_mashup', methods=['POST'])
 def create_mashup_route():
     try:
@@ -190,17 +207,20 @@ def create_mashup_route():
         # Validate required fields
         if not all([singer_name, num_videos, trim_duration, receiver_email]):
             missing_fields = [field for field in ['singer_name', 'num_videos', 'trim_duration', 'receiver_email'] if not request.form.get(field)]
+            logging.error(f"Missing required fields: {missing_fields}")
             return jsonify({'status': 'error', 'message': f'Missing required fields: {", ".join(missing_fields)}'})
 
         # Validate and convert numeric fields
         try:
             num_videos = max(int(num_videos), 10)
             trim_duration = max(int(trim_duration), 20)
-        except ValueError:
+        except ValueError as e:
+            logging.error(f"Invalid numeric values: {str(e)}")
             return jsonify({'status': 'error', 'message': 'Invalid numeric values for num_videos or trim_duration'})
 
         # Validate email
         if not is_valid_email(receiver_email):
+            logging.error(f"Invalid email address: {receiver_email}")
             return jsonify({'status': 'error', 'message': 'Please enter a valid email address.'})
 
         # Fetch YouTube links
@@ -208,6 +228,7 @@ def create_mashup_route():
         videos = get_youtube_links(api_key, singer_name, max_results=num_videos)
 
         if not videos:
+            logging.warning(f"No videos found for {singer_name}")
             return jsonify({'status': 'error', 'message': f'No videos found for {singer_name}. Please try a different singer name.'})
 
         # Create temporary directory
@@ -220,6 +241,7 @@ def create_mashup_route():
             audio_files = download_all_audio(video_urls, download_path)
 
             if not audio_files:
+                logging.error("Failed to download audio files")
                 return jsonify({'status': 'error', 'message': 'Failed to download audio files. Please try again.'})
 
             # Create mashup
@@ -228,6 +250,7 @@ def create_mashup_route():
             mashup_file = create_mashup(audio_files, output_file, trim_duration)
 
             if not mashup_file:
+                logging.error("Failed to create mashup")
                 return jsonify({'status': 'error', 'message': 'Failed to create mashup. Please try again.'})
 
             # Create zip file
@@ -241,8 +264,10 @@ def create_mashup_route():
             email_sent = send_email(sender_email, receiver_email, subject, body, zip_file, email_password)
 
             if email_sent:
+                logging.info("Mashup created and sent successfully")
                 return jsonify({'status': 'success', 'message': 'Mashup created and sent successfully! Check your email.'})
             else:
+                logging.error("Failed to send email")
                 return jsonify({'status': 'error', 'message': 'Mashup created but failed to send email. Please try again.'})
 
     except Exception as e:
@@ -251,4 +276,4 @@ def create_mashup_route():
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=True)

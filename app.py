@@ -75,7 +75,7 @@ def download_single_audio(url, index, download_path):
         }],
         'retries': 3,
         'fragment_retries': 3,
-        'cookies': 'path_to_your_cookies.txt',  # Add this line, pointing to your cookies.txt file
+        'cookies': './cookies.txt',  # Add this line, pointing to your cookies.txt file
     }
 
     max_attempts = 3

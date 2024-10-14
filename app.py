@@ -67,28 +67,40 @@ def get_youtube_links(api_key, query, max_results=20):
 def download_single_audio(url, index, download_path):
     ydl_opts = {
         'format': 'bestaudio/best',
-        'outtmpl': f'{download_path}/song_{index}_%(title)s.%(ext)s',
+        'outtmpl': f'{download_path}/song_{index}.%(ext)s',
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }],
-        'retries': 10,
-        'fragment_retries': 10,
+        'retries': 3,
+        'fragment_retries': 3,
+        'cookies': 'path_to_your_cookies.txt',  # Add this line, pointing to your cookies.txt file
     }
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-        downloaded_files = [f for f in os.listdir(download_path) if f.startswith(f"song_{index}_") and f.endswith(".mp3")]
-        if downloaded_files:
-            return os.path.join(download_path, downloaded_files[0])
-        else:
-            logging.error(f"Downloaded file not found for {url}")
-            return None
-    except Exception as e:
-        logging.error(f"Error downloading audio: {e}")
-        return None
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+            downloaded_files = [f for f in os.listdir(download_path) if f.startswith(f"song_{index}.") and f.endswith(".mp3")]
+            if downloaded_files:
+                return os.path.join(download_path, downloaded_files[0])
+            else:
+                logging.error(f"Downloaded file not found for {url}")
+                return None
+        except Exception as e:
+            logging.error(f"Error downloading audio (attempt {attempt + 1}/{max_attempts}): {e}")
+            if "Sign in to confirm you're not a bot" in str(e):
+                sleep_time = random.uniform(5, 10) 
+                logging.info(f"Detected anti-bot measure. Waiting for {sleep_time:.2f} seconds before retrying...")
+                time.sleep(sleep_time)
+            else:
+                return None 
+
+    logging.error(f"Failed to download audio after {max_attempts} attempts: {url}")
+    return None
+
 
 # Function to download all audio files in parallel
 def download_all_audio(video_urls, download_path):

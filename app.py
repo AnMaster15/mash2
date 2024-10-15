@@ -4,6 +4,10 @@ import logging
 import re
 import zipfile
 import smtplib
+import io
+import random
+import time
+import json
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
@@ -12,102 +16,123 @@ from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import multiprocessing
 from flask import Flask, render_template, request, jsonify, send_from_directory
-from googleapiclient.discovery import build
 import yt_dlp
 from pydub import AudioSegment
+import requests
+from bs4 import BeautifulSoup
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 app = Flask(__name__, static_folder='static')
 
+
+
 # Load API key and email credentials from .env file
 load_dotenv()
-api_key = os.getenv('YOUTUBE_API_KEY')
 sender_email = os.getenv('SENDER_EMAIL')
 email_password = os.getenv('EMAIL_PASSWORD')
 
 # Validate environment variables
-if not all([api_key, sender_email, email_password]):
+if not all([sender_email, email_password]):
     logging.error("Missing environment variables. Please check your .env file.")
     raise ValueError("Missing environment variables. Please check your .env file.")
 
 # Determine the number of CPU cores available
 num_cores = multiprocessing.cpu_count()
 
-
 # Function to validate email
 def is_valid_email(email):
     pattern = r'^[\w\.-]+@[\w\.-]+\.\w+$'
     return re.match(pattern, email) is not None
 
-# Function to get YouTube links
-def get_youtube_links(api_key, query, max_results=20):
+# Function to get YouTube links using web scraping
+def get_youtube_links(query, max_results=20):
     try:
-        youtube = build('youtube', 'v3', developerKey=api_key)
-        search_response = youtube.search().list(
-            q=query,
-            part='snippet',
-            type='video',
-            maxResults=max_results
-        ).execute()
+        search_url = f"https://www.youtube.com/results?search_query={query.replace(' ', '+')}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        response = requests.get(search_url, headers=headers)
+        
+        if response.status_code != 200:
+            logging.error(f"Failed to fetch search results. Status code: {response.status_code}")
+            return []
+
+        # Extract the JSON data containing video information
+        start_marker = "var ytInitialData = "
+        end_marker = ";</script>"
+        start_index = response.text.find(start_marker)
+        end_index = response.text.find(end_marker, start_index)
+        if start_index == -1 or end_index == -1:
+            logging.error("Could not find video data in the response")
+            return []
+        
+        json_str = response.text[start_index + len(start_marker):end_index]
+        data = json.loads(json_str)
 
         videos = []
-        for item in search_response['items']:
-            video_id = item['id']['videoId']
-            video_title = item['snippet']['title']
-            video_url = f"https://www.youtube.com/watch?v={video_id}"
-            videos.append((video_title, video_url))
+        for item in data['contents']['twoColumnSearchResultsRenderer']['primaryContents']['sectionListRenderer']['contents'][0]['itemSectionRenderer']['contents']:
+            if 'videoRenderer' in item:
+                video_data = item['videoRenderer']
+                title = video_data['title']['runs'][0]['text']
+                video_id = video_data['videoId']
+                url = f"https://www.youtube.com/watch?v={video_id}"
+                videos.append((title, url))
+                if len(videos) >= max_results:
+                    break
+
+        if not videos:
+            logging.warning(f"No videos found for query: {query}")
+        else:
+            logging.info(f"Found {len(videos)} videos for query: {query}")
 
         return videos
     except Exception as e:
         logging.error(f"Failed to fetch YouTube links: {e}")
         return []
-
-# Function to download audio from YouTube
-def download_single_audio(url, index, download_path):
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': f'{download_path}/song_{index}.%(ext)s',
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
-        'retries': 3,
-        'fragment_retries': 3,
-        'cookies': './cookies.txt',  # Add this line, pointing to your cookies.txt file
-    }
-
+# Function to stream audio from YouTube
+def stream_audio(url, index, download_path):
     max_attempts = 3
     for attempt in range(max_attempts):
         try:
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+                'outtmpl': f'{download_path}/song_{index}.%(ext)s',
+                'quiet': True,
+                'no_warnings': True,
+            }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
-            downloaded_files = [f for f in os.listdir(download_path) if f.startswith(f"song_{index}.") and f.endswith(".mp3")]
-            if downloaded_files:
-                return os.path.join(download_path, downloaded_files[0])
+            
+            output_path = os.path.join(download_path, f"song_{index}.mp3")
+            if os.path.exists(output_path):
+                return output_path
             else:
-                logging.error(f"Downloaded file not found for {url}")
+                logging.error(f"Output file not found for {url}")
                 return None
         except Exception as e:
-            logging.error(f"Error downloading audio (attempt {attempt + 1}/{max_attempts}): {e}")
-            if "Sign in to confirm you're not a bot" in str(e):
-                sleep_time = random.uniform(5, 10) 
-                logging.info(f"Detected anti-bot measure. Waiting for {sleep_time:.2f} seconds before retrying...")
+            logging.error(f"Error streaming audio (attempt {attempt + 1}/{max_attempts}): {e}")
+            if "HTTP Error 429" in str(e):
+                sleep_time = random.uniform(60, 120)  # Sleep between 1-2 minutes
+                logging.info(f"Rate limited. Waiting for {sleep_time:.2f} seconds before retrying...")
                 time.sleep(sleep_time)
             else:
-                return None 
+                return None
 
-    logging.error(f"Failed to download audio after {max_attempts} attempts: {url}")
+    logging.error(f"Failed to stream audio after {max_attempts} attempts: {url}")
     return None
 
-
-# Function to download all audio files in parallel
-def download_all_audio(video_urls, download_path):
-    downloaded_files = []
-    with ThreadPoolExecutor(max_workers=num_cores) as executor:
+# Function to process all audio files in parallel
+def process_all_audio(video_urls, download_path):
+    processed_files = []
+    with ThreadPoolExecutor(max_workers=min(num_cores, 4)) as executor:  # Limit to 4 concurrent downloads
         futures = {
-            executor.submit(download_single_audio, url, index, download_path): index
+            executor.submit(stream_audio, url, index, download_path): index
             for index, url in enumerate(video_urls, start=1)
         }
 
@@ -115,11 +140,11 @@ def download_all_audio(video_urls, download_path):
             try:
                 mp3_file = future.result()
                 if mp3_file:
-                    downloaded_files.append(mp3_file)
+                    processed_files.append(mp3_file)
             except Exception as e:
                 logging.error(f"Error occurred: {e}")
 
-    return downloaded_files
+    return processed_files
 
 # Function to create a mashup from audio files
 def create_mashup(audio_files, output_file, trim_duration):
@@ -237,24 +262,24 @@ def create_mashup_route():
 
         # Fetch YouTube links
         logging.info(f"Fetching YouTube links for {singer_name}")
-        videos = get_youtube_links(api_key, singer_name, max_results=num_videos)
+        videos = get_youtube_links(singer_name, max_results=num_videos)
 
         if not videos:
             logging.warning(f"No videos found for {singer_name}")
             return jsonify({'status': 'error', 'message': f'No videos found for {singer_name}. Please try a different singer name.'})
-
+    
         # Create temporary directory
         with tempfile.TemporaryDirectory() as download_path:
             logging.info(f"Created temporary directory: {download_path}")
 
-            # Download audio files
+            # Stream and process audio files
             video_urls = [url for _, url in videos]
-            logging.info(f"Downloading {len(video_urls)} audio files")
-            audio_files = download_all_audio(video_urls, download_path)
+            logging.info(f"Processing {len(video_urls)} audio streams")
+            audio_files = process_all_audio(video_urls, download_path)
 
             if not audio_files:
-                logging.error("Failed to download audio files")
-                return jsonify({'status': 'error', 'message': 'Failed to download audio files. Please try again.'})
+                logging.error("Failed to process audio streams")
+                return jsonify({'status': 'error', 'message': 'Failed to process audio streams. Please try again.'})
 
             # Create mashup
             logging.info("Creating mashup")
@@ -287,5 +312,5 @@ def create_mashup_route():
         return jsonify({'status': 'error', 'message': f'An unexpected error occurred: {str(e)}'})
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 7090))
     app.run(host='0.0.0.0', port=port, debug=True)

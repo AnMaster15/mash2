@@ -73,8 +73,12 @@ def download_single_audio(url, index, download_path):
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }],
-        'retries': 3,
-        'fragment_retries': 3,
+        'retries': 10,
+        'fragment_retries': 10,
+        'ignoreerrors': True,
+        'no_warnings': True,
+        'quiet': True,
+        'no_color': True,
     }
 
     max_attempts = 5
@@ -91,12 +95,9 @@ def download_single_audio(url, index, download_path):
                 return None
         except Exception as e:
             logging.error(f"Error downloading audio (attempt {attempt + 1}/{max_attempts}): {e}")
-            if "Sign in to confirm you're not a bot" in str(e):
-                delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
-                logging.info(f"Detected anti-bot measure. Waiting for {delay:.2f} seconds before retrying...")
-                time.sleep(delay)
-            else:
-                return None 
+            delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+            logging.info(f"Waiting for {delay:.2f} seconds before retrying...")
+            time.sleep(delay)
     
     logging.error(f"Failed to download audio after {max_attempts} attempts: {url}")
     return None

@@ -67,21 +67,18 @@ def get_youtube_links(api_key, query, max_results=20):
 
 # Function to download audio from YouTube
 def download_single_audio(url, index, download_path):
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': f'{download_path}/song_{index}.%(ext)s',
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
-        'retries': 10,
-        'fragment_retries': 10,
-        'ignoreerrors': True,
-        'no_warnings': True,
-        'quiet': True,
-        'no_color': True,
-    }
+    
+   ydl_opts = {
+    'format': 'bestaudio/best',
+    'outtmpl': f'{download_path}/song_{index}.%(ext)s',
+    'postprocessors': [{
+        'key': 'FFmpegExtractAudio',
+        'preferredcodec': 'mp3',
+        'preferredquality': '192',
+    }],
+    'cookiefile': 'cookies.txt',  # Path to cookies file
+}
+
 
     max_attempts = 5
     base_delay = 5

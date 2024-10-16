@@ -18,7 +18,7 @@ from pydub import AudioSegment
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
-aapp = Flask(__name__)
+app = Flask(__name__)
 
 
 load_dotenv()

@@ -15,6 +15,8 @@ from flask import Flask, render_template, request, jsonify, send_from_directory
 from googleapiclient.discovery import build
 import yt_dlp
 from pydub import AudioSegment
+import time
+import random
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -85,6 +87,9 @@ def download_single_audio(url, index, download_path):
     base_delay = 5
     for attempt in range(max_attempts):
         try:
+            # Add a random delay before each attempt
+            time.sleep(random.uniform(1, 5))
+            
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
             downloaded_files = [f for f in os.listdir(download_path) if f.startswith(f"song_{index}.") and f.endswith(".mp3")]

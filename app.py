@@ -67,8 +67,7 @@ def get_youtube_links(api_key, query, max_results=20):
 
 # Function to download audio from YouTube
 def download_single_audio(url, index, download_path):
-    
-   ydl_opts = {
+    ydl_opts = {
     'format': 'bestaudio/best',
     'outtmpl': f'{download_path}/song_{index}.%(ext)s',
     'postprocessors': [{
@@ -77,7 +76,7 @@ def download_single_audio(url, index, download_path):
         'preferredquality': '192',
     }],
     'cookiefile': 'cookies.txt',  # Path to cookies file
-    }
+}
 
 
     max_attempts = 5
@@ -290,5 +289,5 @@ def create_mashup_route():
         return jsonify({'status': 'error', 'message': f'An unexpected error occurred: {str(e)}'})
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 5900))
     app.run(host='0.0.0.0', port=port, debug=True)

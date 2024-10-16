@@ -77,7 +77,7 @@ def download_single_audio(url, index, download_path):
         'preferredquality': '192',
     }],
     'cookiefile': 'cookies.txt',  # Path to cookies file
-}
+    }
 
 
     max_attempts = 5

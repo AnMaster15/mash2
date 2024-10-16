@@ -1,7 +1,6 @@
-Flask==2.2.5
 python-dotenv==1.0.0
+streamlit==1.22.0
+google-api-python-client==2.86.0
 yt-dlp==2023.3.4
 pydub==0.25.1
-requests==2.31.0
-beautifulsoup4==4.12.2
-
+ratelimit==2.2.1

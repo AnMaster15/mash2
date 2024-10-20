@@ -5,7 +5,15 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     build-essential \
     python3-dev \
+    pkg-config \
+    libsndfile1-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Now install Python packages
+# Upgrade pip
+RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel
+
+# Install numpy first as it's a base dependency for many packages
+RUN pip3 install --no-cache-dir numpy==1.21.6
+
+# Then install the rest of the requirements
 RUN pip3 install --no-cache-dir -r requirements.txt

@@ -1,8 +1,13 @@
-Flask==2.0.3
-Werkzeug==2.0.3
-python-dotenv==0.19.2
-google-api-python-client==2.47.0
-yt-dlp==2023.10.13
-pydub==0.25.1
-requests==2.27.1
+Flask>=2.3.3
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# YouTube download
+yt-dlp>=2023.12.30
+
+# Audio processing
+numpy>=1.24.3
+SoundFile>=0.12.1
+moviepy>=1.0.3
 gunicorn==20.1.0

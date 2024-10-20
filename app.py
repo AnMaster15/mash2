@@ -4,6 +4,7 @@ import logging
 import re
 import zipfile
 import smtplib
+import json
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
@@ -11,11 +12,11 @@ from email import encoders
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import multiprocessing
-from flask import Flask, render_template, request, jsonify, send_from_directory, Response, stream_with_context
-from googleapiclient.discovery import build
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context
 import yt_dlp
 import soundfile as sf
 import numpy as np
+import scipy.signal
 import time
 import random
 from moviepy.editor import VideoFileClip
@@ -23,7 +24,15 @@ import queue
 import threading
 
 # Set up logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('app.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -31,304 +40,243 @@ app = Flask(__name__)
 # Global queue for log messages
 log_queue = queue.Queue()
 
+def send_log(message, level="info"):
+    """Send a formatted log message to the client."""
+    log_data = {
+        "type": "log",
+        "level": level,
+        "message": message,
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+    }
+    log_queue.put(json.dumps(log_data))
+    if level == "error":
+        logger.error(message)
+    else:
+        logger.info(message)
+
 # Load environment variables
 load_dotenv()
-api_key = os.getenv('YOUTUBE_API_KEY')
 sender_email = os.getenv('SENDER_EMAIL')
 email_password = os.getenv('EMAIL_PASSWORD')
+smtp_server = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
+smtp_port = int(os.getenv('SMTP_PORT', '587'))
 
 # Validate environment variables
-if not all([api_key, sender_email, email_password]):
-    logging.error("Missing environment variables. Please check your .env file.")
-    raise ValueError("Missing environment variables. Please check your .env file.")
+if not all([sender_email, email_password]):
+    error_msg = "Missing environment variables. Please check your .env file."
+    logger.error(error_msg)
+    raise ValueError(error_msg)
 
-# Determine the number of CPU cores available
-num_cores = multiprocessing.cpu_count()
+def create_zip_with_mp3(mashup_wav_path, temp_dir):
+    """Convert WAV to MP3 and create ZIP archive."""
+    try:
+        send_log("Converting WAV to MP3")
+        base_name = os.path.splitext(os.path.basename(mashup_wav_path))[0]
+        mp3_path = os.path.join(temp_dir, f"{base_name}.mp3")
+        
+        # Load WAV file
+        data, sr = sf.read(mashup_wav_path)
+        
+        # Create MP3 using scipy and numpy for processing
+        # Note: Using soundfile to write as MP3 (requires libsndfile with MP3 support)
+        sf.write(mp3_path, data, sr, format='mp3')
+        
+        # Create ZIP file
+        zip_path = os.path.join(temp_dir, f"{base_name}.zip")
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            zipf.write(mp3_path, os.path.basename(mp3_path))
+        
+        send_log("Successfully created ZIP file with MP3")
+        return zip_path
+    except Exception as e:
+        error_msg = f"Error creating ZIP with MP3: {str(e)}"
+        send_log(error_msg, "error")
+        logger.exception(error_msg)
+        return None
+
+
+def send_email_with_attachment(receiver_email, subject, body, attachment_path):
+    """Send an email with a ZIP attachment."""
+    try:
+        send_log(f"Preparing to send email to {receiver_email}")
+        
+        message = MIMEMultipart()
+        message["From"] = sender_email
+        message["To"] = receiver_email
+        message["Subject"] = subject
+        message.attach(MIMEText(body, "plain"))
+
+        # Attach ZIP file
+        with open(attachment_path, "rb") as attachment:
+            part = MIMEBase("application", "zip")
+            part.set_payload(attachment.read())
+            
+        encoders.encode_base64(part)
+        filename = os.path.basename(attachment_path)
+        part.add_header(
+            "Content-Disposition",
+            f"attachment; filename= {filename}",
+        )
+        message.attach(part)
+
+        # Send email
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
+            server.login(sender_email, email_password)
+            server.send_message(message)
+
+        send_log(f"Email sent successfully to {receiver_email}", "success")
+        return True
+
+    except Exception as e:
+        error_msg = f"Failed to send email: {str(e)}"
+        send_log(error_msg, "error")
+        logger.exception(error_msg)
+        return False
+
 
 def is_valid_email(email):
     """Validate email format."""
     pattern = r'^[\w\.-]+@[\w\.-]+\.\w+$'
     return re.match(pattern, email) is not None
 
-def get_youtube_links(api_key, query, max_results=20):
-    """Fetch YouTube video links based on search query."""
+def get_youtube_links(query, max_results=20):
+    """Fetch YouTube video links using yt-dlp."""
+    send_log(f"Searching for YouTube videos: {query}")
     try:
-        youtube = build('youtube', 'v3', developerKey=api_key)
-        search_response = youtube.search().list(
-            q=query,
-            part='snippet',
-            type='video',
-            maxResults=max_results
-        ).execute()
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,
+            'default_search': 'ytsearch',
+        }
 
-        videos = []
-        for item in search_response['items']:
-            video_id = item['id']['videoId']
-            video_title = item['snippet']['title']
-            video_url = f"https://www.youtube.com/watch?v={video_id}"
-            videos.append((video_title, video_url))
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            search_query = f'ytsearch{max_results}:{query}'
+            send_log(f"Executing search query: {search_query}")
+            results = ydl.extract_info(search_query, download=False)
+            
+            videos = []
+            if 'entries' in results:
+                for entry in results['entries']:
+                    if entry:
+                        video_title = entry.get('title', '')
+                        video_url = entry.get('url', '')
+                        if video_title and video_url:
+                            videos.append((video_title, video_url))
+                            send_log(f"Found video: {video_title}")
 
+        send_log(f"Successfully found {len(videos)} videos")
         return videos
     except Exception as e:
-        logging.error(f"Failed to fetch YouTube links: {e}")
+        error_msg = f"Failed to fetch YouTube links: {str(e)}"
+        send_log(error_msg, "error")
+        logger.exception(error_msg)
         return []
 
 def download_single_audio(url, index, download_path):
-    """Download audio from a single YouTube video using improved method."""
-    log_queue.put(f"DOWNLOADING video {index} from {url}")
+    """Download audio from a single YouTube video."""
+    send_log(f"Starting download of video {index}: {url}")
     
     ydl_opts = {
-        'format': 'bestvideo[height<=480]+bestaudio/best',
-        'outtmpl': f'{download_path}/video_{index}.%(ext)s',
-        'quiet': True,
-        'no_warnings': True,
+        'format': 'bestaudio/best',
+        'outtmpl': f'{download_path}/song_{index}.%(ext)s',
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'wav',
+        }],
     }
 
-    max_attempts = 5
-    base_delay = 5
-    
-    for attempt in range(max_attempts):
-        try:
-            # Add random delay to avoid rate limiting
-            time.sleep(random.uniform(1, 5))
-            
-            # Download the video first
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-            
-            # Find the downloaded video file
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            send_log(f"Downloading video {index}")
+            info = ydl.extract_info(url, download=True)
+            send_log(f"Successfully downloaded video {index}: {info.get('title', 'Unknown')}")
+
+            # Verify the downloaded file
             downloaded_files = [f for f in os.listdir(download_path) 
-                              if f.startswith(f"video_{index}.")]
+                              if f.startswith(f"song_{index}") and f.endswith('.wav')]
             
             if not downloaded_files:
-                log_queue.put(f"Downloaded file not found for {url}")
-                continue
+                raise FileNotFoundError(f"Downloaded file not found for video {index}")
                 
-            video_path = os.path.join(download_path, downloaded_files[0])
+            audio_file = os.path.join(download_path, downloaded_files[0])
             
-            # Convert to audio using VideoFileClip
-            try:
-                video = VideoFileClip(video_path)
-                audio_file = os.path.join(download_path, f'song_{index}.wav')
-                video.audio.write_audiofile(audio_file, 
-                                         codec='wav',
-                                         ffmpeg_params=["-loglevel", "quiet"])
-                video.close()
-                
-                # Clean up video file
-                os.remove(video_path)
-                
-                log_queue.put(f"Successfully downloaded and converted video {index}")
-                return audio_file
-                
-            except Exception as e:
-                log_queue.put(f"Error converting video to audio: {e}")
-                if os.path.exists(video_path):
-                    os.remove(video_path)
-                raise
-                
-        except Exception as e:
-            log_queue.put(f"Error downloading audio (attempt {attempt + 1}/{max_attempts}): {e}")
-            delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
-            log_queue.put(f"Waiting for {delay:.2f} seconds before retrying...")
-            time.sleep(delay)
-    
-    log_queue.put(f"Failed to download audio after {max_attempts} attempts: {url}")
-    return None
+            # Verify audio file integrity
+            with sf.SoundFile(audio_file) as sf_file:
+                duration = len(sf_file) / sf_file.samplerate
+                send_log(f"Video {index} audio verified - Duration: {duration:.2f}s")
+            
+            return audio_file
 
-def download_all_audio(video_urls, download_path):
-    """Download all audio files in parallel using improved method."""
-    downloaded_files = []
-    
-    # Create download directory if it doesn't exist
-    os.makedirs(download_path, exist_ok=True)
-    
-    # Clean existing files in download directory
-    for f in os.listdir(download_path):
-        try:
-            os.remove(os.path.join(download_path, f))
-        except Exception as e:
-            log_queue.put(f"Error cleaning up file {f}: {e}")
-    
-    with ThreadPoolExecutor(max_workers=num_cores) as executor:
-        futures = {
-            executor.submit(download_single_audio, url, index, download_path): index
-            for index, url in enumerate(video_urls, start=1)
-        }
-
-        for future in as_completed(futures):
-            try:
-                audio_file = future.result()
-                if audio_file and os.path.exists(audio_file):
-                    downloaded_files.append(audio_file)
-                    log_queue.put(f"Successfully processed {audio_file}")
-            except Exception as e:
-                log_queue.put(f"Error occurred during download: {e}")
-
-    log_queue.put(f"Successfully downloaded {len(downloaded_files)} audio files")
-    return downloaded_files
+    except Exception as e:
+        error_msg = f"Error downloading video {index}: {str(e)}"
+        send_log(error_msg, "error")
+        logger.exception(error_msg)
+        return None
 
 def create_mashup(audio_files, output_file, trim_duration):
     """Create a mashup from multiple audio files."""
-    log_queue.put("GENERATING Mashup file")
-    mashup = None
-    total_trim_duration_per_file = trim_duration  # In seconds
-    samplerate = None
+    send_log("Starting mashup creation")
+    try:
+        processed_audio = []
+        target_sr = 44100  # Target sample rate
 
-    for file in audio_files:
-        try:
-            audio, file_samplerate = sf.read(file)
+        for idx, file in enumerate(audio_files, 1):
+            send_log(f"Processing audio file {idx}/{len(audio_files)}")
             
-            # Set samplerate if not set yet
-            if samplerate is None:
-                samplerate = file_samplerate
+            # Load audio file
+            audio, sr = sf.read(file)
+            send_log(f"Loaded audio file {idx} - Sample rate: {sr}Hz")
 
             # Convert to mono if stereo
-            if audio.ndim > 1:
+            if len(audio.shape) > 1:
                 audio = np.mean(audio, axis=1)
+                send_log(f"Converted audio {idx} to mono")
 
-            # Trim audio to specified duration
-            if len(audio) / samplerate < total_trim_duration_per_file:
-                log_queue.put(f"Audio file {file} is shorter than trim duration. Using full length.")
-                part = audio
-            else:
-                part = audio[:int(total_trim_duration_per_file * samplerate)]
+            # Resample if necessary
+            if sr != target_sr:
+                send_log(f"Resampling audio {idx} to {target_sr}Hz")
+                audio = scipy.signal.resample(audio, int(len(audio) * target_sr / sr))
 
-            # Add to mashup
-            if mashup is None:
-                mashup = part
-            else:
-                mashup = np.concatenate((mashup, part))
+            # Trim audio
+            samples_to_keep = min(len(audio), int(trim_duration * target_sr))
+            audio = audio[:samples_to_keep]
+            send_log(f"Trimmed audio {idx} to {trim_duration} seconds")
 
-        except Exception as e:
-            log_queue.put(f"Error processing file {file}: {e}")
+            # Normalize audio
+            if np.max(np.abs(audio)) > 0:
+                audio = audio / np.max(np.abs(audio))
+            
+            processed_audio.append(audio)
 
-    if mashup is None or len(mashup) == 0:
-        log_queue.put("No audio files were successfully processed.")
+        # Concatenate all processed audio
+        send_log("Concatenating processed audio files")
+        final_audio = np.concatenate(processed_audio)
+
+        # Apply fade in/out
+        fade_duration = min(1.0, trim_duration * 0.1)
+        fade_samples = int(fade_duration * target_sr)
+        fade_in = np.linspace(0, 1, fade_samples)
+        fade_out = np.linspace(1, 0, fade_samples)
+        
+        final_audio[:fade_samples] *= fade_in
+        final_audio[-fade_samples:] *= fade_out
+        
+        send_log("Applied fade in/out effects")
+
+        # Save final mashup
+        sf.write(output_file, final_audio, target_sr)
+        send_log(f"Successfully saved mashup to {output_file}")
+        
+        return output_file
+
+    except Exception as e:
+        error_msg = f"Error creating mashup: {str(e)}"
+        send_log(error_msg, "error")
+        logger.exception(error_msg)
         return None
 
-    # Ensure final mashup duration matches expected length
-    expected_mashup_duration = total_trim_duration_per_file * len(audio_files)
-    if len(mashup) / samplerate < expected_mashup_duration:
-        log_queue.put(f"Mashup duration ({len(mashup)/samplerate}s) is less than expected ({expected_mashup_duration}s).")
-    else:
-        mashup = mashup[:int(expected_mashup_duration * samplerate)]
-
-    sf.write(output_file, mashup, samplerate)
-    return output_file
-
-def create_zip_file(file_path, zip_path):
-    """Create a ZIP file containing the mashup."""
-    with zipfile.ZipFile(zip_path, 'w') as zipf:
-        zipf.write(file_path, os.path.basename(file_path))
-    return zip_path
-
-def send_email(sender_email, receiver_email, subject, body, attachment_path, password):
-    """Send email with attachment using Gmail SMTP."""
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = sender_email
-        msg['To'] = receiver_email
-        msg['Subject'] = subject
-
-        msg.attach(MIMEText(body, 'plain'))
-
-        # Add attachment
-        with open(attachment_path, 'rb') as attachment:
-            part = MIMEBase('application', 'zip')
-            part.set_payload(attachment.read())
-            encoders.encode_base64(part)
-            part.add_header('Content-Disposition', 
-                          f"attachment; filename= {os.path.basename(attachment_path)}")
-            msg.attach(part)
-
-        # Connect to Gmail SMTP server
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()  # Enable TLS
-        
-        # Login to Gmail
-        try:
-            server.login(sender_email, password)
-        except smtplib.SMTPAuthenticationError:
-            log_queue.put("Authentication failed. Please check your email and password.")
-            return False
-
-        # Send email
-        text = msg.as_string()
-        server.sendmail(sender_email, receiver_email, text)
-        server.quit()
-
-        log_queue.put("Email sent successfully!")
-        return True
-    except Exception as e:
-        log_queue.put(f"Failed to send email: {e}")
-        return False
-
-def create_mashup_process(singer_name, num_videos, trim_duration, receiver_email):
-    """Main process for creating and sending mashup."""
-    try:
-        log_queue.put("Starting mashup creation process...")
-
-        # Get YouTube videos
-        log_queue.put(f"Fetching YouTube links for {singer_name}")
-        videos = get_youtube_links(api_key, f"{singer_name} official new video song", max_results=num_videos)
-
-        if not videos:
-            log_queue.put(f"No videos found for {singer_name}")
-            return
-
-        video_urls = [url for _, url in videos]
-
-        # Create temporary directory for processing
-        with tempfile.TemporaryDirectory() as download_path:
-            log_queue.put(f"Created temporary directory: {download_path}")
-
-            # Download audio files
-            log_queue.put(f"Downloading {len(video_urls)} audio files")
-            audio_files = download_all_audio(video_urls, download_path)
-
-            if not audio_files:
-                log_queue.put("Failed to download audio files")
-                return
-
-            # Create mashup
-            log_queue.put("Creating mashup")
-            output_file = os.path.join(download_path, "mashup.wav")
-            mashup_file = create_mashup(audio_files, output_file, trim_duration)
-
-            if not mashup_file:
-                log_queue.put("Failed to create mashup")
-                return
-
-            # Create ZIP file
-            zip_file = os.path.join(download_path, "mashup.zip")
-            create_zip_file(mashup_file, zip_file)
-
-            # Send email
-            log_queue.put(f"Sending email to {receiver_email}")
-            subject = f"Your {singer_name} YouTube Mashup"
-            body = f"""
-            Hello!
-            
-            Your custom YouTube mashup of {singer_name} songs is ready! 
-            Duration: {trim_duration * len(audio_files)} seconds.
-            
-            Please find the mashup attached to this email.
-            
-            Best regards,
-            Your Mashup App
-            """
-            email_sent = send_email(sender_email, receiver_email, subject, body, zip_file, email_password)
-
-            if email_sent:
-                log_queue.put("Mashup created and sent successfully!")
-            else:
-                log_queue.put("Failed to send email")
-
-    except Exception as e:
-        log_queue.put(f"Error occurred: {str(e)}")
-
-# Flask routes
 @app.route('/')
 def index():
     """Render the main page."""
@@ -344,50 +292,71 @@ def create_mashup_route():
         trim_duration = int(request.form.get('trim_duration', 20))
         receiver_email = request.form.get('receiver_email')
 
-        # Validate inputs
-        if not all([singer_name, receiver_email]):
-            return jsonify({
-                'status': 'error',
-                'message': 'Missing required fields'
-            })
-
         if not is_valid_email(receiver_email):
-            return jsonify({
-                'status': 'error',
-                'message': 'Invalid email address'
-            })
+            return jsonify({"status": "error", "message": "Invalid email address"})
 
-        # Start mashup process in background
-        threading.Thread(
-            target=create_mashup_process,
-            args=(singer_name, num_videos, trim_duration, receiver_email)
-        ).start()
+        send_log(f"Received mashup request - Singer: {singer_name}, Videos: {num_videos}, Duration: {trim_duration}s")
 
-        return jsonify({
-            'status': 'success',
-            'message': 'Mashup creation process started. Please check the logs for progress.'
-        })
+        with tempfile.TemporaryDirectory() as temp_dir:
+            send_log(f"Created temporary directory: {temp_dir}")
+
+            # Get YouTube videos and download audio files
+            videos = get_youtube_links(f"{singer_name} song", num_videos)
+            if not videos:
+                return jsonify({"status": "error", "message": "No videos found"})
+
+            audio_files = []
+            for idx, (title, url) in enumerate(videos, 1):
+                audio_file = download_single_audio(url, idx, temp_dir)
+                if audio_file:
+                    audio_files.append(audio_file)
+
+            if not audio_files:
+                return jsonify({"status": "error", "message": "Failed to download any audio files"})
+
+            # Create mashup
+            output_wav = os.path.join(temp_dir, f"{singer_name}_mashup.wav")
+            mashup_file = create_mashup(audio_files, output_wav, trim_duration)
+
+            if mashup_file:
+                # Create ZIP with MP3
+                zip_file = create_zip_with_mp3(mashup_file, temp_dir)
+                if not zip_file:
+                    return jsonify({"status": "error", "message": "Failed to create ZIP file"})
+
+                # Send email with ZIP
+                subject = f"Your {singer_name} Mashup is Ready!"
+                body = f"""
+Hello!
+
+Your mashup of {singer_name}'s songs has been created successfully. 
+The mashup contains {len(audio_files)} songs, each trimmed to {trim_duration} seconds.
+The MP3 file is included in the ZIP attachment.
+
+Enjoy your music!
+
+Best regards,
+Your Mashup Creator
+"""
+                if send_email_with_attachment(receiver_email, subject, body, zip_file):
+                    return jsonify({
+                        "status": "success",
+                        "message": f"Mashup created and sent to {receiver_email}"
+                    })
+                else:
+                    return jsonify({
+                        "status": "error",
+                        "message": "Mashup created but failed to send email"
+                    })
+            else:
+                return jsonify({"status": "error", "message": "Failed to create mashup"})
 
     except Exception as e:
-        log_queue.put(f"Error in create_mashup_route: {str(e)}")
-        return jsonify({
-            'status': 'error',
-            'message': f'An error occurred: {str(e)}'
-        })
-
-@app.route('/logs')
-def logs():
-    """Stream logs to client."""
-    def generate():
-        while True:
-            log_message = log_queue.get()
-            yield f"data: {log_message}\n\n"
-
-    return Response(
-        stream_with_context(generate()),
-        mimetype='text/event-stream'
-    )
+        error_msg = f"Error in mashup creation: {str(e)}"
+        send_log(error_msg, "error")
+        logger.exception(error_msg)
+        return jsonify({"status": "error", "message": str(e)})
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5900))
+    port = int(os.environ.get('PORT', 5800))
     app.run(host='0.0.0.0', port=port, debug=True)

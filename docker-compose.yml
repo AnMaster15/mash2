@@ -1,8 +1,11 @@
-version: "3.8"
-services:
-  flask-app:
-    build: .
-    ports:
-      - "5100:5100"
-    env_file:
-      - .env
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    libsndfile1 \
+    libportaudio2 \
+    ffmpeg \
+    build-essential \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Now install Python packages
+RUN pip3 install --no-cache-dir -r requirements.txt
